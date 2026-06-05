@@ -97,8 +97,8 @@ class BiSOFollower(Robot):
     def _cameras_ft(self) -> dict[str, tuple]:
         # Per-arm camera features keep their left_/right_ prefixes (set by SOFollower).
         arm_camera_ft = {
-            **{f"left_{k}": v  for k, v in self.left_arm._cameras_ft.items()},
-            **{f"right_{k}": v for k, v in self.right_arm._cameras_ft.items()},
+            **{f"{k}_left": v  for k, v in self.left_arm._cameras_ft.items()},
+            **{f"{k}_right": v for k, v in self.right_arm._cameras_ft.items()},
         }
 
         # ── Top camera features ───────────────────────────────────────────────
@@ -162,10 +162,10 @@ class BiSOFollower(Robot):
         obs_dict = {}
 
         left_obs = self.left_arm.get_observation()
-        obs_dict.update({f"left_{key}": value for key, value in left_obs.items()})
+        obs_dict.update({f"{key}_left": value for key, value in left_obs.items()})
 
         right_obs = self.right_arm.get_observation()
-        obs_dict.update({f"right_{key}": value for key, value in right_obs.items()})
+        obs_dict.update({f"{key}_right": value for key, value in right_obs.items()})
 
         # ── Read top cameras ──────────────────────────────────────────────────
         # Keys match those registered in _cameras_ft so the dataset writer
