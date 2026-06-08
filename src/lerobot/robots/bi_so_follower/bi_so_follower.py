@@ -97,8 +97,8 @@ class BiSOFollower(Robot):
     def _cameras_ft(self) -> dict[str, tuple]:
         # Per-arm camera features keep their left_/right_ prefixes (set by SOFollower).
         arm_camera_ft = {
-            **{f"{k}_left": v  for k, v in self.left_arm._cameras_ft.items()},
-            **{f"{k}_right": v for k, v in self.right_arm._cameras_ft.items()},
+            **{f"left_{k}": v  for k, v in self.left_arm._cameras_ft.items()},
+            **{f"right_{k}": v for k, v in self.right_arm._cameras_ft.items()},
         }
 
         # ── Top camera features ───────────────────────────────────────────────
