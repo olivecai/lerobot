@@ -162,14 +162,11 @@ class BiSOFollower(Robot):
         obs_dict = {}
 
         left_obs = self.left_arm.get_observation()
-        obs_dict.update({f"{key}_left": value for key, value in left_obs.items()})
+        obs_dict.update({f"left_{key}": value for key, value in left_obs.items()})  # was {key}_left
 
         right_obs = self.right_arm.get_observation()
-        obs_dict.update({f"{key}_right": value for key, value in right_obs.items()})
+        obs_dict.update({f"right_{key}": value for key, value in right_obs.items()})  # was {key}_right
 
-        # ── Read top cameras ──────────────────────────────────────────────────
-        # Keys match those registered in _cameras_ft so the dataset writer
-        # picks them up automatically.
         for name, cam in self.top_cameras.items():
             obs_dict[f"{name}"] = cam.async_read(timeout_ms=200)
 
