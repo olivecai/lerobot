@@ -162,10 +162,18 @@ class BiSOFollower(Robot):
         obs_dict = {}
 
         left_obs = self.left_arm.get_observation()
-        obs_dict.update({f"left_{key}": value for key, value in left_obs.items()})  # was {key}_left
+        for key, value in left_obs.items():
+            if key.endswith(".pos"):
+                obs_dict[f"left_{key}"] = value  # motor keys: left_shoulder_pan.pos
+            else:
+                obs_dict[f"{key}_left"] = value  # camera keys: wrist_left
 
         right_obs = self.right_arm.get_observation()
-        obs_dict.update({f"right_{key}": value for key, value in right_obs.items()})  # was {key}_right
+        for key, value in right_obs.items():
+            if key.endswith(".pos"):
+                obs_dict[f"right_{key}"] = value  # motor keys: right_shoulder_pan.pos
+            else:
+                obs_dict[f"{key}_right"] = value  # camera keys: wrist_right
 
         for name, cam in self.top_cameras.items():
             obs_dict[f"{name}"] = cam.async_read(timeout_ms=200)
