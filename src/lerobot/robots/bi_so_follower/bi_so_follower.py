@@ -95,23 +95,17 @@ class BiSOFollower(Robot):
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
-        # Per-arm camera features keep their left_/right_ prefixes (set by SOFollower).
         arm_camera_ft = {
-            **{f"left_{k}": v  for k, v in self.left_arm._cameras_ft.items()},
-            **{f"right_{k}": v for k, v in self.right_arm._cameras_ft.items()},
+            **{f"{k}_left": v  for k, v in self.left_arm._cameras_ft.items()},   # wrist_left
+            **{f"{k}_right": v for k, v in self.right_arm._cameras_ft.items()},  # wrist_right
         }
-
-        # ── Top camera features ───────────────────────────────────────────────
-        # Shape is read directly from the camera config so it matches
-        # the tensors returned by async_read() / read().
         top_camera_ft = {}
         for name, cam in self.top_cameras.items():
-            top_camera_ft[f"{name}"] = (
+            top_camera_ft[name] = (
                 cam.config.height,
                 cam.config.width,
                 cam.config.channels if hasattr(cam.config, "channels") else 3,
             )
-
         return {**arm_camera_ft, **top_camera_ft}
 
     @cached_property
