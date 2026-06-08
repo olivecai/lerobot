@@ -189,8 +189,8 @@ class BiSOFollower(Robot):
         sent_right = self.right_arm.send_action(right_action)
 
         return {
-            **{f"{k}_left":  v for k, v in sent_left.items()},
-            **{f"{k}_right": v for k, v in sent_right.items()},
+            **{f"left_{k}":  v for k, v in sent_left.items()},
+            **{f"right_{k}": v for k, v in sent_right.items()},
         }
 
     @check_if_not_connected
