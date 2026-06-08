@@ -45,6 +45,15 @@ class BiSOFollower(Robot):
         super().__init__(config)
         self.config = config
 
+        right_arm_config = SOFollowerRobotConfig(
+            id=f"{config.id}_right" if config.id else None,
+            calibration_dir=config.calibration_dir,
+            port=config.right_arm_config.port,
+            disable_torque_on_disconnect=config.right_arm_config.disable_torque_on_disconnect,
+            max_relative_target=config.right_arm_config.max_relative_target,
+            use_degrees=config.right_arm_config.use_degrees,
+            cameras=config.right_arm_config.cameras,
+        )
         left_arm_config = SOFollowerRobotConfig(
             id=f"{config.id}_left" if config.id else None,
             calibration_dir=config.calibration_dir,
@@ -55,18 +64,9 @@ class BiSOFollower(Robot):
             cameras=config.left_arm_config.cameras,
         )
 
-        right_arm_config = SOFollowerRobotConfig(
-            id=f"{config.id}_right" if config.id else None,
-            calibration_dir=config.calibration_dir,
-            port=config.right_arm_config.port,
-            disable_torque_on_disconnect=config.right_arm_config.disable_torque_on_disconnect,
-            max_relative_target=config.right_arm_config.max_relative_target,
-            use_degrees=config.right_arm_config.use_degrees,
-            cameras=config.right_arm_config.cameras,
-        )
 
-        self.left_arm = SOFollower(left_arm_config)
         self.right_arm = SOFollower(right_arm_config)
+        self.left_arm = SOFollower(left_arm_config)
 
         # ── Top / global cameras ──────────────────────────────────────────────
         # Instantiate each camera from the configs provided in BiSOFollowerConfig.
@@ -79,8 +79,8 @@ class BiSOFollower(Robot):
         # Expose a unified cameras dict for compatibility with the rest of the codebase.
         # Order: left-arm cameras, right-arm cameras, then global top cameras.
         self.cameras = {
-            **self.left_arm.cameras,
             **self.right_arm.cameras,
+            **self.left_arm.cameras,
             **self.top_cameras,
         }
 
@@ -89,15 +89,15 @@ class BiSOFollower(Robot):
     @property
     def _motors_ft(self) -> dict[str, type]:
         return {
-            **{f"left_{k}": v  for k, v in self.left_arm._motors_ft.items()},
             **{f"right_{k}": v for k, v in self.right_arm._motors_ft.items()},
+            **{f"left_{k}": v  for k, v in self.left_arm._motors_ft.items()},
         }
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
         arm_camera_ft = {
-            **{f"{k}_left": v  for k, v in self.left_arm._cameras_ft.items()},   # wrist_left
             **{f"{k}_right": v for k, v in self.right_arm._cameras_ft.items()},  # wrist_right
+            **{f"{k}_left": v  for k, v in self.left_arm._cameras_ft.items()},   # wrist_left
         }
         top_camera_ft = {}
         for name, cam in self.top_cameras.items():
@@ -155,19 +155,19 @@ class BiSOFollower(Robot):
     def get_observation(self) -> RobotObservation:
         obs_dict = {}
 
-        left_obs = self.left_arm.get_observation()
-        for key, value in left_obs.items():
-            if key.endswith(".pos"):
-                obs_dict[f"left_{key}"] = value  # motor keys: left_shoulder_pan.pos
-            else:
-                obs_dict[f"{key}_left"] = value  # camera keys: wrist_left
-
         right_obs = self.right_arm.get_observation()
         for key, value in right_obs.items():
             if key.endswith(".pos"):
                 obs_dict[f"right_{key}"] = value  # motor keys: right_shoulder_pan.pos
             else:
                 obs_dict[f"{key}_right"] = value  # camera keys: wrist_right
+
+        left_obs = self.left_arm.get_observation()
+        for key, value in left_obs.items():
+            if key.endswith(".pos"):
+                obs_dict[f"left_{key}"] = value  # motor keys: left_shoulder_pan.pos
+            else:
+                obs_dict[f"{key}_left"] = value  # camera keys: wrist_left
 
         for name, cam in self.top_cameras.items():
             obs_dict[f"{name}"] = cam.async_read(timeout_ms=200)
@@ -176,29 +176,29 @@ class BiSOFollower(Robot):
 
     @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
-        left_action = {
-            key.removeprefix("left_"): value
-            for key, value in action.items()
-            if key.startswith("left_")
-        }
         right_action = {
             key.removeprefix("right_"): value
             for key, value in action.items()
             if key.startswith("right_")
         }
+        left_action = {
+            key.removeprefix("left_"): value
+            for key, value in action.items()
+            if key.startswith("left_")
+        }
 
-        sent_left  = self.left_arm.send_action(left_action)
         sent_right = self.right_arm.send_action(right_action)
+        sent_left  = self.left_arm.send_action(left_action)
 
         return {
-            **{f"left_{k}":  v for k, v in sent_left.items()},
             **{f"right_{k}": v for k, v in sent_right.items()},
+            **{f"left_{k}":  v for k, v in sent_left.items()},
         }
 
     @check_if_not_connected
     def disconnect(self):
-        self.left_arm.disconnect()
         self.right_arm.disconnect()
+        self.left_arm.disconnect()
 
         # ── Disconnect top cameras ────────────────────────────────────────────
         for name, cam in self.top_cameras.items():
