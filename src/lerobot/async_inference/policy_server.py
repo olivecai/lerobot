@@ -75,6 +75,7 @@ from lerobot.transport import (
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
 from lerobot.types import PolicyAction
+from lerobot.utils.constants import OBS_IMAGES
 
 from .configs import PolicyServerConfig
 from .constants import SUPPORTED_POLICIES
@@ -431,6 +432,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         try:
             getactions_starts = time.perf_counter()
             obs = self.observation_queue.get(timeout=self.config.obs_queue_timeout)
+            # No-op: we intentionally prefer the flat keys (e.g. 'top_color')
+            # over dotted dataset keys (e.g. 'observation.images.top_color').
+            # Avoid injecting dotted aliases to keep snapshot keys simple.
             self.logger.info(
                 f"Running inference for observation #{obs.get_timestep()} (must_go: {obs.must_go})"
             )
@@ -471,7 +475,73 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             return services_pb2.Empty()
 
         except Exception as e:
-            self.logger.error(f"Error in StreamActions: {e}")
+            # Try to extract available image-like keys from the failing observation (if present),
+            # otherwise fall back to the latest snapshot maintained by the server.
+            try:
+                image_keys = []
+                obs_keys = []
+                if "obs" in locals() and hasattr(obs, "get_observation"):
+                    raw_obs = obs.get_observation()
+                    if isinstance(raw_obs, dict):
+                        obs_keys = list(raw_obs.keys())
+                        image_keys = [k for k, v in raw_obs.items() if _is_image_like(v)]
+                if not image_keys:
+                    with self.latest_observation_lock:
+                        image_keys = list(self.latest_images.keys())
+                        # also include latest observation keys for extra context
+                        if self.latest_observation is not None:
+                            obs_keys = list(self.latest_observation.keys())
+            except Exception:
+                image_keys = []
+                obs_keys = []
+
+            attempted_key = None
+            if isinstance(e, KeyError) and e.args:
+                attempted_key = e.args[0]
+
+            # If the code attempted to access a dotted path like
+            # 'observation.images.top_color', try to map it to an existing key
+            # (e.g., 'top_color') and offer a fallback by inserting a mapping
+            # into `self.latest_observation` so downstream diagnostics/API can
+            # still find the value.
+            suggested_mapping = None
+            try:
+                if attempted_key and isinstance(attempted_key, str) and "." in attempted_key:
+                    candidate = attempted_key.split(".")[-1]
+                    # Prefer raw_obs from current failed observation if available
+                    source_val = None
+                    if 'raw_obs' in locals() and isinstance(raw_obs, dict) and candidate in raw_obs:
+                        source_val = raw_obs[candidate]
+                    else:
+                        with self.latest_observation_lock:
+                            if self.latest_observation is not None and candidate in self.latest_observation:
+                                source_val = self.latest_observation[candidate]
+
+                    if source_val is not None:
+                        # We prefer the flat key (candidate) over dotted keys.
+                        # Do not inject dotted aliases; just suggest the flat mapping.
+                        suggested_mapping = candidate
+            except Exception:
+                suggested_mapping = None
+
+            # Log attempted key (if any), available image-like keys, and nearby observation keys.
+            if attempted_key is not None:
+                self.logger.error(
+                    "KeyError in GetActions - attempted key: %s | available image keys: %s | observation keys: %s | suggested mapping: %s",
+                    attempted_key,
+                    image_keys,
+                    obs_keys,
+                    suggested_mapping,
+                    exc_info=True,
+                )
+            else:
+                self.logger.error(
+                    "Error in GetActions: %s | available image keys: %s | observation keys: %s",
+                    e,
+                    image_keys,
+                    obs_keys,
+                    exc_info=True,
+                )
 
             return services_pb2.Empty()
 
