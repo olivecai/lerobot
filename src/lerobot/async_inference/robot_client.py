@@ -31,6 +31,18 @@ python src/lerobot/async_inference/robot_client.py \
     --aggregate_fn_name=weighted_average \
     --debug_visualize_queue_size=True
 ```
+
+Status-only mode — publishes one observation to the policy server's FastAPI layer then exits.
+No policy is loaded, no actions are executed, no threads are started:
+```shell
+python src/lerobot/async_inference/robot_client.py \
+    --robot.type=so100_follower \
+    --robot.port=/dev/tty.usbmodem58760431541 \
+    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}}" \
+    --robot.id=black \
+    --server_address=127.0.0.1:8080 \
+    --get_current_status=True
+```
 """
 
 import logging
@@ -212,6 +224,44 @@ class RobotClient:
 
         except grpc.RpcError as e:
             self.logger.error(f"Error sending observation #{obs.get_timestep()}: {e}")
+            return False
+
+    def publish_current_status(self) -> bool:
+        """Capture and send a single observation to the policy server without rolling out a policy.
+
+        This reuses the exact same SendObservations gRPC path as the normal control loop, so the
+        policy server's FastAPI layer (/status, /observation, /images, etc.) will reflect the
+        current robot state immediately after this call returns.
+
+        must_go is set to True so the server stores the observation unconditionally, matching the
+        behaviour of the first observation sent at the start of a normal episode.
+
+        Returns True if the observation was sent successfully, False otherwise.
+        """
+        self.logger.info("Capturing current robot state (status-only mode)...")
+
+        try:
+            raw_observation: RawObservation = self.robot.get_observation()
+
+            observation = TimedObservation(
+                timestamp=time.time(),
+                observation=raw_observation,
+                timestep=0,
+            )
+            # Force the server to store this observation immediately, identical to
+            # the must-go logic in control_loop_observation when the action queue is empty.
+            observation.must_go = True
+
+            success = self.send_observation(observation)
+            if success:
+                self.logger.info(
+                    f"Status observation sent (timestep=0, must_go=True) | "
+                    f"Observation keys: {list(raw_observation.keys())}"
+                )
+            return success
+
+        except Exception as e:
+            self.logger.error(f"Unexpected error while capturing/sending status observation: {e}")
             return False
 
     def _inspect_action_queue(self):
@@ -485,12 +535,41 @@ class RobotClient:
 def async_client(cfg: RobotClientConfig):
     logging.info(pformat(asdict(cfg)))
 
-    # TODO: Assert if checking robot support is still needed with the plugin system
-    # if cfg.robot.type not in SUPPORTED_ROBOTS:
-    #     raise ValueError(f"Robot {cfg.robot.type} not yet supported!")
-
     client = RobotClient(cfg)
 
+    # -------------------------------------------------------------------------
+    # Status-only mode: send one observation through the normal SendObservations
+    # gRPC path so the policy server's FastAPI layer (/status, /observation,
+    # /images) reflects the current robot state. No policy is loaded, no threads
+    # are started, no actions are executed. The script exits immediately after
+    # the observation is acknowledged.
+    # -------------------------------------------------------------------------
+    if cfg.get_current_status:
+        client.logger.info(
+            "Running in status-only mode (--get_current_status=True). "
+            "No policy will be executed."
+        )
+        # Minimal handshake — confirms the server is reachable without triggering
+        # policy initialisation (SendPolicyInstructions is intentionally skipped).
+        try:
+            client.stub.Ready(services_pb2.Empty())
+        except grpc.RpcError as e:
+            client.logger.error(f"Could not reach policy server at {cfg.server_address}: {e}")
+            client.stop()
+            return
+
+        try:
+            success = client.publish_current_status()
+            if not success:
+                client.logger.error("Failed to publish robot status.")
+        finally:
+            client.stop()
+            client.logger.info("Status-only mode complete. Client exited.")
+        return
+
+    # -------------------------------------------------------------------------
+    # Normal mode: full policy handshake + threaded control loop.
+    # -------------------------------------------------------------------------
     if client.start():
         client.logger.info("Starting action receiver thread...")
 

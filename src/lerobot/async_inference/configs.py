@@ -105,20 +105,55 @@ class RobotClientConfig:
 
     This class defines all configurable parameters for the RobotClient,
     including network connection, policy settings, and control behavior.
-    """
 
-    # Policy configuration
-    policy_type: str = field(metadata={"help": "Type of policy to use"})
-    pretrained_name_or_path: str = field(metadata={"help": "Pretrained model name or path"})
+    Status-only mode (--get_current_status=True):
+        Only --robot, --server_address, and --get_current_status are required.
+        Policy fields (policy_type, pretrained_name_or_path, actions_per_chunk)
+        are ignored and may be omitted. No policy is loaded, no actions are
+        executed, and the script exits after sending one observation.
+
+    Normal mode:
+        All fields are required as usual.
+    """
 
     # Robot configuration (for CLI usage - robot instance will be created from this)
     robot: RobotConfig = field(metadata={"help": "Robot configuration"})
 
-    # Policies typically output K actions at max, but we can use less to avoid wasting bandwidth (as actions
-    # would be aggregated on the client side anyway, depending on the value of `chunk_size_threshold`)
-    actions_per_chunk: int = field(metadata={"help": "Number of actions per chunk"})
+    # Status-only mode: publish one observation to the policy server's FastAPI
+    # layer and exit immediately, without loading a policy or executing actions.
+    get_current_status: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "If True, capture and publish a single observation to the policy server "
+                "so that /status, /observation, and /images reflect the current robot state, "
+                "then exit. No policy is loaded and no actions are executed. "
+                "policy_type, pretrained_name_or_path, and actions_per_chunk are not required "
+                "in this mode."
+            )
+        },
+    )
 
-    # Task instruction for the robot to execute (e.g., 'fold my tshirt')
+    # Policy configuration — required in normal mode, ignored in status-only mode.
+    policy_type: str = field(
+        default="",
+        metadata={"help": "Type of policy to use (required unless --get_current_status=True)"},
+    )
+    pretrained_name_or_path: str = field(
+        default="",
+        metadata={
+            "help": "Pretrained model name or path (required unless --get_current_status=True)"
+        },
+    )
+    actions_per_chunk: int = field(
+        default=0,
+        metadata={
+            "help": "Number of actions per chunk (required unless --get_current_status=True)"
+        },
+    )
+
+    # Task instruction for the robot to execute (e.g., 'fold my tshirt').
+    # Not required in status-only mode.
     task: str = field(default="", metadata={"help": "Task instruction for the robot to execute"})
 
     # Network configuration
@@ -133,7 +168,7 @@ class RobotClientConfig:
         },
     )
 
-    # Control behavior configuration
+    # Control behaviour configuration
     chunk_size_threshold: float = field(default=0.5, metadata={"help": "Threshold for chunk size control"})
     fps: int = field(default=DEFAULT_FPS, metadata={"help": "Frames per second"})
 
@@ -158,26 +193,39 @@ class RobotClientConfig:
         if not self.server_address:
             raise ValueError("server_address cannot be empty")
 
-        if not self.policy_type:
-            raise ValueError("policy_type cannot be empty")
-
-        if not self.pretrained_name_or_path:
-            raise ValueError("pretrained_name_or_path cannot be empty")
-
-        if not self.policy_device:
-            raise ValueError("policy_device cannot be empty")
-
-        if not self.client_device:
-            raise ValueError("client_device cannot be empty")
+        if self.fps <= 0:
+            raise ValueError(f"fps must be positive, got {self.fps}")
 
         if self.chunk_size_threshold < 0 or self.chunk_size_threshold > 1:
             raise ValueError(f"chunk_size_threshold must be between 0 and 1, got {self.chunk_size_threshold}")
 
-        if self.fps <= 0:
-            raise ValueError(f"fps must be positive, got {self.fps}")
+        if not self.client_device:
+            raise ValueError("client_device cannot be empty")
+
+        if self.get_current_status:
+            # Policy fields are irrelevant in status-only mode — skip their validation.
+            # aggregate_fn is still resolved so RobotClient.__init__ doesn't break, but
+            # it will never be called.
+            self.aggregate_fn = get_aggregate_function(self.aggregate_fn_name)
+            return
+
+        # Normal mode: enforce all policy fields.
+        if not self.policy_type:
+            raise ValueError("policy_type cannot be empty (omit only when --get_current_status=True)")
+
+        if not self.pretrained_name_or_path:
+            raise ValueError(
+                "pretrained_name_or_path cannot be empty (omit only when --get_current_status=True)"
+            )
+
+        if not self.policy_device:
+            raise ValueError("policy_device cannot be empty")
 
         if self.actions_per_chunk <= 0:
-            raise ValueError(f"actions_per_chunk must be positive, got {self.actions_per_chunk}")
+            raise ValueError(
+                f"actions_per_chunk must be positive, got {self.actions_per_chunk} "
+                "(omit only when --get_current_status=True)"
+            )
 
         self.aggregate_fn = get_aggregate_function(self.aggregate_fn_name)
 
@@ -190,6 +238,7 @@ class RobotClientConfig:
         """Convert the configuration to a dictionary."""
         return {
             "server_address": self.server_address,
+            "get_current_status": self.get_current_status,
             "policy_type": self.policy_type,
             "pretrained_name_or_path": self.pretrained_name_or_path,
             "policy_device": self.policy_device,
