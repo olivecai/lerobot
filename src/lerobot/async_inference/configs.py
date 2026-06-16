@@ -64,6 +64,11 @@ class PolicyServerConfig:
         default=DEFAULT_OBS_QUEUE_TIMEOUT, metadata={"help": "Timeout for observation queue in seconds"}
     )
 
+    preload_models_path: str | None = None  # path to JSON file with models to preload
+
+    policy_type: str | None = field(default=None, metadata={"help": "Policy type for preloading (e.g. groot, act)"})
+    device: str = field(default="cuda", metadata={"help": "Device to load preloaded models onto"})
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.port < 1 or self.port > 65535:
@@ -96,6 +101,9 @@ class PolicyServerConfig:
             "fps": self.fps,
             "environment_dt": self.environment_dt,
             "inference_latency": self.inference_latency,
+            "preload_models_path": self.preload_models_path,
+            "policy_type": self.policy_type,
+            "device": self.device,
         }
 
 

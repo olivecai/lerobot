@@ -260,6 +260,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.latest_server_timestamp: float | None = None
         self.latest_timestep: int | None = None
 
+        self._preloaded_policies: dict[str, Any] = {}
+        self._preload_manifest: dict[str, dict] = {}  # task-name -> {task, repo-id}
+
+        if config.preload_models_path:
+            self._load_models_from_manifest(config.preload_models_path)
+
     @property
     def running(self):
         return not self.shutdown_event.is_set()
@@ -283,6 +289,55 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.latest_client_timestamp = None
             self.latest_server_timestamp = None
             self.latest_timestep = None
+
+    def _load_models_from_manifest(self, manifest_path: str) -> None:
+        """Load all models listed in the JSON manifest at startup."""
+        import json
+
+        self.logger.info(f"Loading preload manifest from {manifest_path}")
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        self._preload_manifest = manifest
+
+        for task_name, spec in manifest.items():
+            repo_id = spec["repo-id"]
+            self.logger.info(f"Preloading '{task_name}' from '{repo_id}'...")
+            try:
+                self._preload_policy(repo_id)
+                self.logger.info(f"  ✓ '{task_name}' ready")
+            except Exception as e:
+                self.logger.error(f"  ✗ Failed to preload '{task_name}' ({repo_id}): {e}")
+
+        self.logger.info(
+            f"Preloading complete. {len(self._preloaded_policies)}/{len(manifest)} models ready: "
+            + ", ".join(self._preloaded_policies.keys())
+        )
+
+    def _preload_policy(self, pretrained_name_or_path: str) -> None:
+        """Load a single policy into the registry by repo-id."""
+        if pretrained_name_or_path in self._preloaded_policies:
+            self.logger.info(f"'{pretrained_name_or_path}' already in registry, skipping")
+            return
+
+        policy_type = self.config.policy_type
+        if not policy_type:
+            raise ValueError(
+                "policy_type must be set in PolicyServerConfig to preload models. "
+                "Add --policy_type=groot (or act, etc.) to your server launch command."
+            )
+
+        policy_class = get_policy_class(policy_type)
+        device = self.config.device
+
+        start = time.perf_counter()
+        policy = policy_class.from_pretrained(pretrained_name_or_path)
+        policy.to(device)
+        policy.eval()
+        elapsed = time.perf_counter() - start
+
+        self._preloaded_policies[pretrained_name_or_path] = policy
+        self.logger.info(f"Loaded '{pretrained_name_or_path}' in {elapsed:.2f}s on {device}")
 
     def Ready(self, request, context):  # noqa: N802
         client_id = context.peer()
@@ -318,14 +373,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.latest_timestep = timestep
 
     def SendPolicyInstructions(self, request, context):  # noqa: N802
-        """Receive policy instructions from the robot client"""
-
+        """Receive policy instructions from the robot client."""
         if not self.running:
             self.logger.warning("Server is not running. Ignoring policy instructions.")
             return services_pb2.Empty()
 
         client_id = context.peer()
-
         policy_specs = pickle.loads(request.data)  # nosec
 
         if not isinstance(policy_specs, RemotePolicyConfig):
@@ -337,30 +390,36 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 f"Supported policies: {SUPPORTED_POLICIES}"
             )
 
-        self.logger.info(
-            f"Receiving policy instructions from {client_id} | "
-            f"Policy type: {policy_specs.policy_type} | "
-            f"Pretrained name or path: {policy_specs.pretrained_name_or_path} | "
-            f"Actions per chunk: {policy_specs.actions_per_chunk} | "
-            f"Device: {policy_specs.device}"
-        )
-
         self.device = policy_specs.device
-        self.policy_type = policy_specs.policy_type  # act, pi0, etc.
+        self.policy_type = policy_specs.policy_type
         self.lerobot_features = policy_specs.lerobot_features
         self.actions_per_chunk = policy_specs.actions_per_chunk
 
-        policy_class = get_policy_class(self.policy_type)
+        pretrained_path = policy_specs.pretrained_name_or_path
 
-        start = time.perf_counter()
-        self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
-        self.policy.to(self.device)
+        # ── Preloaded registry lookup ──────────────────────────────────────────
+        if pretrained_path in self._preloaded_policies:
+            self.logger.info(
+                f"Using preloaded policy for '{pretrained_path}' (skipping from_pretrained)"
+            )
+            self.policy = self._preloaded_policies[pretrained_path]
+        else:
+            self.logger.info(
+                f"'{pretrained_path}' not in preload registry — loading now "
+                f"(preloaded: {list(self._preloaded_policies.keys())})"
+            )
+            start = time.perf_counter()
+            policy_class = get_policy_class(self.policy_type)
+            self.policy = policy_class.from_pretrained(pretrained_path)
+            self.policy.to(self.device)
+            self.logger.info(f"Loaded in {time.perf_counter() - start:.2f}s")
+        # ──────────────────────────────────────────────────────────────────────
 
-        # Load preprocessor and postprocessor, overriding device to match requested device
+        # Preprocessor/postprocessor always rebuilt (cheap, needs rename_map from client)
         device_override = {"device": self.device}
         self.preprocessor, self.postprocessor = make_pre_post_processors(
             self.policy.config,
-            pretrained_path=policy_specs.pretrained_name_or_path,
+            pretrained_path=pretrained_path,
             preprocessor_overrides={
                 "device_processor": device_override,
                 "rename_observations_processor": {"rename_map": policy_specs.rename_map},
@@ -368,9 +427,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             postprocessor_overrides={"device_processor": device_override},
         )
 
-        end = time.perf_counter()
-
-        self.logger.info(f"Time taken to put policy on {self.device}: {end - start:.4f} seconds")
+        self.logger.info(
+            f"Policy ready | type: {self.policy_type} | path: {pretrained_path} | device: {self.device}"
+        )
 
         return services_pb2.Empty()
 
@@ -694,6 +753,58 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 "observation": dict(raw_observation) if raw_observation is not None else None,
                 "image_keys": list(self.latest_images.keys()),
             }
+
+    def _load_models_from_manifest(self, manifest_path: str) -> None:
+        """Load all models listed in the JSON manifest at startup."""
+        import json
+
+        self.logger.info(f"Loading preload manifest from {manifest_path}")
+
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        self._preload_manifest = manifest
+
+        for task_name, spec in manifest.items():
+            repo_id = spec["repo-id"]
+            self.logger.info(f"Preloading '{task_name}' from '{repo_id}'...")
+            try:
+                self._preload_policy(repo_id)
+                self.logger.info(f"  ✓ '{task_name}' ready")
+            except Exception as e:
+                self.logger.error(f"  ✗ Failed to preload '{task_name}' ({repo_id}): {e}")
+
+        self.logger.info(
+            f"Preloading complete. {len(self._preloaded_policies)}/{len(manifest)} models ready: "
+            + ", ".join(self._preloaded_policies.keys())
+        )
+
+    def _preload_policy(self, pretrained_name_or_path: str) -> None:
+        """Load a single policy into the registry by repo-id."""
+        if pretrained_name_or_path in self._preloaded_policies:
+            self.logger.info(f"'{pretrained_name_or_path}' already in registry, skipping")
+            return
+
+        # policy_type must be known; for preloading we infer from config or default
+        # If your server is single-policy-type (e.g. always groot), set it in config
+        policy_type = getattr(self.config, "policy_type", None)
+        if policy_type is None:
+            raise ValueError(
+                "policy_type must be set in PolicyServerConfig to preload models. "
+                "Add --policy_type=groot (or act, etc.) to your server launch command."
+            )
+
+        policy_class = get_policy_class(policy_type)
+
+        start = time.perf_counter()
+        policy = policy_class.from_pretrained(pretrained_name_or_path)
+        device = getattr(self.config, "device", "cuda")
+        policy.to(device)
+        policy.eval()
+        elapsed = time.perf_counter() - start
+
+        self._preloaded_policies[pretrained_name_or_path] = policy
+        self.logger.info(f"Loaded '{pretrained_name_or_path}' in {elapsed:.2f}s on {device}")
 
     def stop(self):
         """Stop the server"""
