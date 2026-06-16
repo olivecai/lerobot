@@ -105,6 +105,7 @@ class RobotClient:
         Args:
             config: RobotClientConfig containing all configuration parameters
         """
+        start=time.time()
         self.config = config
         self.robot = make_robot_from_config(config.robot)
         self.robot.connect()
@@ -145,6 +146,9 @@ class RobotClient:
         self._control_loop_thread: threading.Thread | None = None
 
         self.logger.info("Robot connected and ready")
+        end = time.time()
+        print(f"Client initialization took {end - start:.2f}s")
+        
 
     # ------------------------------------------------------------------
     # Connection
